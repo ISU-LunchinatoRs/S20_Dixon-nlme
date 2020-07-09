@@ -1,0 +1,435 @@
+---
+title: "Nonlinear Mixed Effect models"
+author: "Philip Dixon"
+date: "7/2/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(dplyr)    # some data manipulation
+library(lattice)  # data plots by plot
+
+library(nlraa)    # source of data
+library(nlme)     # nlme()
+
+library(lme4)     # nlmer()
+library(metafor)  # meta analysis
+library(rstanarm) # Bayesian nlmer
+```
+
+### Data and context from Fernando's nlraa package
+#### live fuel moisture content, only for one species: S. bracteolactus
+####   3 plots, data measured over time, 7 times
+
+```{r prep data}
+data(lfmc)
+sapply(lfmc, class)
+
+with(lfmc, table(site, plot))
+
+# consider only S. bracteolactus
+sb <- lfmc %>% filter(leaf.type=="S. bracteolactus")
+with(sb, table(plot, time))
+
+xyplot(lfmc ~ time | plot, data=sb, layout=c(3,1))
+```
+
+### Analyses in the nlme package
+#### fit fixed effects models to each plot
+
+```{r fixed}
+# first define the y, x, and grouping variables
+#   group must be a factor variable (already set up)
+#   can specify nested groups (B within A) by A/B
+#     (more later)
+#   result depends on whether X is continuous or factor
+sbGrp <- groupedData(lfmc ~ time | plot, data=sb)
+
+# and there is a nice lattice graph plot of data in each group
+plot(sbGrp)
+```
+
+#### use self-start functions
+
+SSxxxx functions are "self-start" nonlinear models, include common ones in base R and lots of agronomic ones in nlraa.  Self-start functions provide information about the model, derivatives wrt parameters, and (usually) reasonable estimators of starting values.  Fernando's nlraa vignette, vignette('nlraa') lists the SS functions in nlme and nlraa.  
+
+If you frequently use a function not on either list, it is worth writing your own self-start function.  If a one-off, can just specify the model and provide starting values.
+
+#### nlsList() fits the model each group of data
+
+Have the usual R helper functions.  Plus I show one way to graph data and predictions for each group.
+
+```{r nlsList}
+sb.plot <- nlsList(lfmc ~ SSdlf(time, upper, lower, mid, scale), data=sbGrp)
+sb.plot
+summary(sb.plot)
+
+# wald confidence intervals
+intervals(sb.plot)
+
+# profile likelihood intervals, but doesn't converge here
+confint(sb.plot)
+
+par(mfrow=c(1,3), mar=c(3,3,0,0)+0.3, mgp=c(2,0.8,0))
+sb.pred1 <- predict(sb.plot)
+for (i in unique(sbGrp$plot)) {
+  keep <- sbGrp$plot==i
+  plot(sbGrp$time[keep], sbGrp$lfmc[keep], pch=19, col=4)
+  lines(sbGrp$time[keep], sb.pred1[keep])
+}
+```
+
+Predicting every day to get smoother plot requires a bit more setup.
+
+```{r nlslist2}
+days <- expand.grid(time=0:80, plot=1:3)
+# include plot so can extract for each plot
+days$pred <- predict(sb.plot, newdata=days)
+# and store prediction in that data frame
+# one quirk - plot variable ignored; group info used instead
+#   so days needs to have all times for plot 1, then for plot 2
+#   order of variables in the expand.grid() matters
+
+# if have
+#  days <- expand.grid(plot=1:3, time=0:80)
+# you clearly get the wrong fitted curve
+
+par(mfrow=c(1,3), mar=c(3,3,0,0)+0.3, mgp=c(2,0.8,0))
+for (i in unique(sbGrp$plot)) {
+  keep <- sbGrp$plot==i
+  plot(sbGrp$time[keep], sbGrp$lfmc[keep], pch=19, col=4)
+  keeppred <- days$plot==i
+  lines(days$time[keeppred], days$pred[keeppred])
+}
+```
+
+#### fit nl mixed effect model
+
+Easy if start with the plot-specific fits (the nlsList object)
+
+```{r nlme1}
+# get a warning message - don't ignore it 
+sb.nlme <- nlme(sb.plot)
+
+# blindly follow the advice and increase # iterations
+
+sb.nlme <- nlme(sb.plot, 
+  control=nlmeControl(MaxIter = 200) )
+sb.nlme <- nlme(sb.plot, 
+  control=nlmeControl(MaxIter = 200, msMaxIter=200) )
+```
+
+#### instead of blindly trying harder, let's look at the output:
+```{r nlme1a}
+sb.nlme
+```
+
+#### we see that nlme is trying to fit 4 random effects (one per parameter) with arbitrary correlation matrix. 
+General positive-definite or look at estimated RE structure: includes  correlations between parameters.
+We're trying to estimate 4 variances and 6 correlations from 3 units (plots).
+General pdMat (i.e., with correlations) is the default.
+
+Simplify the random effects structure - no correlations.  That is a pdDiag() variance covariance matrix.  This runs without error.
+
+```{r nlme2}
+sb.nlme2 <- nlme(sb.plot, random = pdDiag(upper + lower + mid + scale ~ 1) )
+
+# could also use update(sp.nlme, random = pdDiag(upper + lower + mid + scale ~ 1) )
+#   to change the random effect specification without specifying everything else again
+```
+
+?pdClasses tells you the various possibilities.  default is pdLogChol, which is a better way to parameterize pdSymm
+
+#### More things you can do with a fitted nlme object
+````{r nlme2b}
+# look at the output
+summary(sb.nlme2)
+
+# confidence intervals for the fixed effects
+intervals(sb.nlme2, which='fixed')
+
+# look at the plot-specific coefficients: two ways
+
+# estimated fixed effects and predicted random effects
+fixef(sb.nlme2)
+ranef(sb.nlme2)
+
+# matrix of coefficients, rows = plots
+coef(sb.nlme2)
+
+# look at residual vs predicted value plot
+# these are standardized (variance = 1) conditional residuals 
+#   i.e. given BLUPs of the random effects
+# useful to validate assumptions about the error distribution
+plot(sb.nlme2)
+
+# plot the results: two possibilities:
+#  predict using the fixed effects (same curve for all three plots)
+plot(augPred(sb.nlme2, level=0))
+
+# or using the plot-specific coefficients
+plot(augPred(sb.nlme2, level=1))
+
+# or combine the two
+plot(augPred(sb.nlme2, level=0:1))
+
+```
+
+Results suggest no variability in lower, mid and scale, just in upper.  Include random effect only in upper.
+
+Also illustrate starting with a data frame, not the nlsList.  Possible with update because model specified in sb.nlme2.
+I've never had success starting a new with a data frame.  Haven't figured out how to specify everything nlme needs to know.  My recommendation: start with grouped data.
+
+```{r nlme3}
+sb.nlme3 <- update(sb.nlme2, random = pdDiag(upper ~ 1), data=sbGrp)
+
+# if start with Grouped data, need to include the model
+sb.nlme3 <- nlme(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+  random = pdDiag(upper ~ 1), data=sbGrp)
+
+# but you need to provide more information if try to start with data.  This fails, so it isn't run here.
+
+# temp <- nlme(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+#  random = pdDiag(upper ~ 1), data=sb)
+
+# can fit a model with no random effects using nls().  log-Likelihoods and AIC values can be compared between nls and nlme results.
+
+sb.nlme4 <- nls(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+   data=sbGrp)
+
+# which random effect model is more appropriate?
+c(corr = AIC(sb.nlme), var4 = AIC(sb.nlme2), 
+  var1=AIC(sb.nlme3), fixed=AIC(sb.nlme4) )
+ c(corr = BIC(sb.nlme), var4 = BIC(sb.nlme2), 
+  var1=BIC(sb.nlme3), fixed=BIC(sb.nlme4) ) 
+```
+
+I suspect there is a subtle issue with BIC for a mixed model.  BIC depends on # nobs. To me, n for evaluating a random effect should be the number of groups (levels of the random effect).  It seems that BIC() is the usual stats BIC function, which uses the total # observations.  So all models other than the nls one get more heavily penalized than "they should".
+
+This highlights a tension that runs throughout complicated models and especially NL mixed models.  Do you use available functions and hope they do the correct things with your model?  Or, do you write your own functions so you control exactly what they do?
+
+#### What if multiple levels of nesting?
+
+lfmc data set has 3 observations per plot, except for plot 3, time 1.  Imagine the same  three plants are repeatedly sampled over time.  Need to add an ID variable.  I've done that and saved it as lfmcID.csv.  Nested random effects are specified as big / small, where small is nested in big.
+
+```{r mult}
+sb2 <- read.csv('lfmcID.csv', as.is=T)
+sb2$plot <- factor(sb2$plot)
+sb2$ID <- factor(sb2$ID)
+
+sb2.Grp <-  groupedData(lfmc ~ time | plot/ID, data=sb2)
+
+# models fit separately to each plot and ID
+sb2.plotID <- nlsList(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+  data=sb2.Grp)
+sb2.plotID
+```
+
+Syntax for fitting nlme with nested groups is not well documented.  What to do is not immediately obvious and the errors aren't helpful.  Another thing I haven't yet figured out.
+
+It would be great to get parametric bootstrap for confidence intervals or standard errors.  nlme includes a simulate.lme() function, but that fails when provided a non-linear fit.  Although nlme fits inherit the lme class, simulate.lme() seems to require an lme object.  Not run here
+
+
+```{r nlme sim}
+# sb.sim <- simulate(sb.nlme3, method='ML')
+```
+
+### Using nlmer models
+
+nlmer and nlme have the same relationship as lmer and lme for linear models.  nlmer can do almost everything that nlme does.  Differences are here and summarized in my notes.  
+
+Differences: 
+
++    nlme can include correlated errors; nlmer only as random effects
++    specify random effects in a 3 part formula, no need to group data first
++    nlmer uses a different default optimization algorithm; for smooth problems, want to specify a faster optimizer
++    nlmer doesn't use the self-start part of a SS function
++    need to specify starting values, partly because start= also names the parameters to estimate
+
+Fitting the upper only RE model
+
+```{r nlmer}
+# using the default optimizer (Nelder-Mead)
+sb.nlmer3 <- nlmer(
+  lfmc ~ SSdlf(time, upper, lower, mid, scale) ~ upper | plot,
+  start=c(upper=286, lower=53, mid=33, scale=-16),
+  data=sb)
+# complains about not converged
+# Nelder-Mead is often slow and troublesome
+# if needed more interations, add , optCtrl=list(maxfun=20000)
+#   to the nlmerControl argument
+
+# better solution is to change optimizer
+# bobyqa is an enhanced version of BGFS from opim
+#   uses gradient information
+sb.nlmer3 <- nlmer(
+  lfmc ~ SSdlf(time, upper, lower, mid, scale) ~ upper | plot,
+  start=c(upper=286, lower=53, mid=33, scale=-16),
+  control=nlmerControl(optimizer='bobyqa'),
+  data=sb)
+summary(sb.nlmer3)
+
+# could also use the SSfpl(): four param logistic function from base stats.  Param order changes
+sb.nlmer3b <- nlmer(
+  lfmc ~ SSfpl(time, lower, upper, mid, scale) ~ upper | plot,
+  start=c(upper=286, lower=53, mid=33, scale=-16),
+  control=nlmerControl(optimizer='bobyqa'),
+  data=sb)
+sb.nlmer3b
+```
+
+
+#### More possible models with nlmer()
+
+Can add additional random effects, either correlated or not.  Syntax identical to lme()
+
+```{r nlmer4}
+#   Correlated (fails because corr=1)
+
+sb.nlmer4a <- nlmer(
+  lfmc ~ SSdlf(time, upper, lower, mid, scale) ~ (upper + lower | plot),
+  start=c(upper=286, lower=53, mid=33, scale=-16),
+  control=nlmerControl(optimizer='bobyqa'),
+  data=sb)
+
+# independent random effects
+sb.nlmer4b <- nlmer(
+  lfmc ~ SSdlf(time, upper, lower, mid, scale) ~ 
+    (upper | plot)  + (lower | plot),
+  start=c(upper=286, lower=53, mid=33, scale=-16),
+  control=nlmerControl(optimizer='bobyqa'),
+  data=sb)
+```
+
+
+lme4 includes a bootMer() function for bootstrap confidence intervals, but I haven't figured out how to use it correctly (yet).
+
+#### comparisons of nlme and nlmer predictions
+
+```{r compare}
+# for plots in the data set
+# predictions - for plots in the data set
+#   use blups of the random effects for each plot
+
+sb.nlme.pred <- predict(sb.nlme3)
+# default is finest grouping level
+
+sb.nlmer.pred <- predict(sb.nlmer3)
+
+# compare them
+par(mar=c(3,3,0,0)+0.2, mgp=c(2,0.8,0))
+par(mfrow=c(1,3))
+for (i in unique(sb$plot)) {
+  bit <- subset(sb, plot==i)
+  plot(bit$time, bit$lfmc, pch=19, col=4, 
+    xlab='Time', ylab='lfmc')
+  lines(bit$time, sb.nlme.pred[sb$plot==i], lty=1, col=3, lwd=2)
+  lines(bit$time, sb.nlmer.pred[sb$plot==i], lty=2, col=4, lwd=2)
+  legend('topright',bty='n', lty=1:2, col=c(4,3), 
+    legend=c('nlme', 'nlmer'), lwd=2)
+  }
+
+# predictions for a new plot
+#   based on fixed effect model
+
+newdata <- data.frame(time=1:72)
+
+sb.nlme.pred0 <- predict(sb.nlme3, newdata=newdata, level=0)
+# level 0 is the population estimates of fixed effects
+# when you have a new plot, don't have any knowledge of its random effects
+# so predictions are based on the population (only fixed effects) parameters
+
+# Should be possible for predictions from nlmer objects
+#   but I haven't figured it out (yet)
+```
+
+#### meta analysis:
+
+Starts with plot-specific estimates and standard errors.  Requires that can fit model to each subject (e.g. plot).
+
+Easiest way (that I know) is to extract from the coefficients part of the summary of an nlsList object.  Then use the metafor::rma() function to do a random effects meta analysis.  Have to specify the response (yi) and its standard error (sei).  Or, could specify a variance instead of an se.
+
+```{r MA}
+temp <- summary(sb.plot)$coef
+temp
+
+# first column is the estimate, second is the se
+upper <- temp[,1:2, 'upper']
+upper
+
+# random effects meta analysis
+rma(yi=upper[,1], sei=upper[,2], method='REML')
+
+# fixed effects meta analysis
+rma(yi=upper[,1], sei=upper[,2], method='FE')
+```
+
+Differences from nlme:
+
+1.  MA estimates based on plot-specific fits
++     all parameters differ among plots
++     nlme can fit models with some parameters differing, others same for all plots (omitted from random = )
+2.  MA uses only moments (estimates, se's)
++     nlme uses full distribution of random effects
++     experience => not very sensitive to non-normal re's
+3.  self-starting part of SSxxxx functions not (currently) used
++     need to specify starting values as a named vector
++     fixed effect estimates ignoring plot is often a good start
+
+
+### Bayesian inference 
+
+Implemented in various packages, e.g. rjags, rstan, rstanarm and brms.  rstanarm and brms use a more intuitive model-based syntax, not a programming-based model specification.
+
+#### Using rstanarm
+
+I'll demonstrate rstanarm.   It takes advantage of pre-programmed features of models.  Hence, can ONLY use self starting functions in base stats:    SSasymp, SSasympOff, SSasympOrig, SSbiexp, SSfol, SSfpl, SSgompertz, SSlogis, SSmicmen, and SSweibull.
+
+rstanarm functions are named stan_XX() where XX is the corresponding non-stan function.
+
+```{r bayes1, cache=TRUE}
+sb.bayes <- stan_nlmer(
+  lfmc ~ SSfpl(time, upper, lower, mid, scale) ~ upper | plot,
+  chains=3,
+  iter=5000,
+  data=sb)
+```
+
+Lots of things you can do with the collection of posterior samples.  Should ALWAYS check for convergence before going any further.
+
+```{r bayes2}
+# check convergence using Rhat
+summary(sb.bayes)[,'Rhat']
+
+# visual exploration of model results using shiny via launch_shinystan  (commented out in the Rmd file)
+#  if a large data set, probably want to turn off
+# posterior predictive checks (   ,ppd = F)
+#
+#  launch_shinystan(sb.bayes)
+
+# lots of information about estimates and diagnostics
+summary(sb.bayes)
+
+# extract plot-specific coefficients
+coefficients(sb.bayes)
+
+posterior_interval(sb.bayes)
+
+pairs(sb.bayes, 
+  pars=c('upper','lower','mid','scale', 
+         'Sigma[plot:upper,upper]'),
+  off_diag_args=list(size=0.5, alpha = 0.15)
+  )
+
+```
+
+I note that the posterior distributions are far from normal.  Hence, Wald inference (i.e. default se's, tests, and confidence intervals from nlme or nlmer) is suspect.
+Alternatives are profile likelihood intervals (not yet available in nlme/nlmer) or a parametric bootstrap (nlmer:bootMer).
+
+
+
+
