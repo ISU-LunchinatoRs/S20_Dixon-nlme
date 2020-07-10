@@ -229,9 +229,65 @@ sb2.plotID <- nlsList(lfmc ~ SSdlf(time, upper, lower, mid, scale),
 sb2.plotID
 ```
 
-Syntax for fitting nlme with nested groups is not well documented.  What to do is not immediately obvious and the errors aren't helpful.  Another thing I haven't yet figured out.
+#### what if there are multiple levels of nesting
 
-It would be great to get parametric bootstrap for confidence intervals or standard errors.  nlme includes a simulate.lme() function, but that fails when provided a non-linear fit.  Although nlme fits inherit the lme class, simulate.lme() seems to require an lme object.  Not run here
+lfmc has three observations per plot.  These were destructively sampled, so they are independent replicates.  
+
+Imagine instead that the same plants were sampled non-destructively.  If the data set has an ID variable, nested in plot, then you can connect the measurements on the same plant.  We want to fit models with two levels of random effects plot and ID within plot.  The nlme/lme syntax specifies both as plot/ID.
+
+ID.csv is a made up data set where I have assumed that the first obs for each plot/time is ID 1, the second is ID 2, and the third is ID 3.
+
+```{r multiple}
+sb2 <- read.csv('lfmcID.csv', as.is=T)
+sb2$plot <- factor(sb2$plot)
+sb2$ID <- factor(sb2$ID)
+
+sb2.Grp <-  groupedData(lfmc ~ time | plot/ID, data=sb2)
+
+# models fit separately to each plot and ID
+sb2.plotID <- nlsList(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+  data=sb2.Grp)
+sb2.plotID
+
+# fitting a nl me with nested groups: code from Fernando
+#   variability only in upper
+
+# Starting with the grouped data doesn't work: not run here
+# sb2.nlme <- nlme(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+#  random = list(plot = upper ~ 1, ID= upper~1), 
+#  groups = ~ plot/ID,
+#  data=sb2.Grp)
+
+# starting with a single effect model, then updating does
+# this doesn't run because sb2.Grp has nested groups
+#sb1.nlme <- nlme(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+#  random = upper ~ 1,
+#  data=sb2.Grp)
+
+# you have to turn off the "nested groups" first
+sb2.GrpB <-  groupedData(lfmc ~ time | plot, data=sb2)
+
+sb1.nlme <- nlme(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+  random = upper ~ 1,
+  data=sb2.GrpB)
+
+sb2.nlme <- update(sb1.nlme, 
+  random = list(group = upper ~ 1,
+     ID = upper ~ 1),
+  groups = ~ group/ID)
+
+sb2.nlme
+
+# and can extend to different RE structure at each level
+sb3.nlme <- update(sb1.nlme, 
+  random = list(group = pdMat(upper + scale ~ 1),
+     ID = pdMat(upper ~ 1) ),
+  groups = ~ group/ID)
+
+sb3.nlme
+```
+
+It would be great to use a parametric bootstrap to get confidence intervals and/or standard errors.  nlme includes a simulate.lme() function, but that fails when provided a non-linear fit.  Although nlme fits inherit the lme class, simulate.lme() seems to require an lme object.  Not run here
 
 
 ```{r nlme sim}
@@ -249,8 +305,9 @@ Differences:
 +    nlmer uses a different default optimization algorithm; for smooth problems, want to specify a faster optimizer
 +    nlmer doesn't use the self-start part of a SS function
 +    need to specify starting values, partly because start= also names the parameters to estimate
++    nlmer can have crossed random effects; nlme only allows nested.
 
-Fitting the upper only RE model
+#### Fitting the upper only RE model in nlmer
 
 ```{r nlmer}
 # using the default optimizer (Nelder-Mead)

@@ -171,7 +171,7 @@ c(corr = AIC(sb.nlme), var4 = AIC(sb.nlme2),
  c(corr = BIC(sb.nlme), var4 = BIC(sb.nlme2), 
   var1=BIC(sb.nlme3), fixed=BIC(sb.nlme4) ) 
  
-# what if multiple levels of nesting
+# what if there are multiple levels of nesting
 
 sb2 <- read.csv('lfmcID.csv', as.is=T)
 sb2$plot <- factor(sb2$plot)
@@ -184,15 +184,48 @@ sb2.plotID <- nlsList(lfmc ~ SSdlf(time, upper, lower, mid, scale),
   data=sb2.Grp)
 sb2.plotID
 
-# but syntax for fitting nlme with nested groups is not well 
-#   documented.  Not immediately obvious and the errors aren't helpful
+# fitting a nl me with nested groups: code from Fernando
+#   variability only in upper
+
+# Starting with the grouped data doesn't work
+sb2.nlme <- nlme(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+  random = list(plot = upper ~ 1, ID= upper~1), 
+  groups = ~ plot/ID,
+  data=sb2.Grp)
+
+# starting with a single effect model, then updating does
+sb1.nlme <- nlme(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+  random = upper ~ 1,
+  data=sb2.Grp)
+
+# but you have to turn off the "nested groups" first
+sb2.GrpB <-  groupedData(lfmc ~ time | plot, data=sb2)
+
+sb1.nlme <- nlme(lfmc ~ SSdlf(time, upper, lower, mid, scale), 
+  random = upper ~ 1,
+  data=sb2.GrpB)
+
+sb2.nlme <- update(sb1.nlme, 
+  random = list(group = upper ~ 1,
+     ID = upper ~ 1),
+  groups = ~ group/ID)
+
+sb2.nlme
+
+# and can extend to different RE structure at each level
+sb3.nlme <- update(sb1.nlme, 
+  random = list(group = pdMat(upper + scale ~ 1),
+     ID = pdMat(upper ~ 1) ),
+  groups = ~ group/ID)
+
+sb3.nlme
 
 # if the normal approximation (for estimates) is suspect, use a parametric bootstrap
 
 # nlme includes a simulate.lme() function, but that fails with a non-linear fit
 sb.sim <- simulate(sb.nlme3, method='ML')
 
-# can also do everything with nlmer
+# can also do much of this with nlmer
 # differences: 
 # 1) NL function must return predictions as a vector 
 #    AND have a gradient attribute.  Self-start functions include gradients
